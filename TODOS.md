@@ -4,7 +4,7 @@
 
 - [ ] **Priority: P1** Eval harness: golden transcript with precision/recall measurement (deferred from v0.2.0 plan)
 - [ ] **Priority: P1** Incremental offset-based harvesting for large transcripts (deferred from v0.2.0 plan)
-- [ ] **Priority: P1** README with quickstart + config reference (deferred from v0.2.0 plan)
+- [x] **Completed: v0.3.0.0 (2026-04-09)** README with quickstart + config reference
 - [x] **Completed: v0.3.0.0 (2026-04-09)** MCP server / Claude Code extension integration — eliminate start/end ceremony entirely
 - [ ] **Priority: P2** CI/CD pipeline for PyPI publishing (GitHub Actions)
 - [ ] **Priority: P2** Multi-provider LLM abstraction (OpenAI, Ollama) — v0.3.0

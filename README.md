@@ -12,9 +12,41 @@ Wormhole gives your AI tools persistent memory across sessions. It harvests know
 pip install -e .
 ```
 
+Optional extras:
+
+```bash
+pip install -e ".[llm]"   # LLM-assisted extraction (Anthropic Haiku)
+pip install -e ".[mcp]"   # MCP server for Claude Code live queries
+```
+
 Requires Python 3.10+.
 
 ## Quick Start
+
+### Daemon mode (recommended)
+
+Install once, forget about it. Wormhole discovers your projects, watches for new sessions, and auto-harvests knowledge in the background.
+
+```bash
+# Start the background daemon
+wormhole up
+
+# Register MCP server so Claude Code can query your vault mid-session
+wormhole mcp install
+
+# That's it. Wormhole auto-discovers projects from ~/.claude/projects/,
+# creates .wormhole/ vaults, and harvests knowledge as you work.
+
+# Check what's running
+wormhole daemon-status
+
+# Stop the daemon
+wormhole down
+```
+
+### Manual mode
+
+For per-project, per-session control:
 
 ```bash
 # Initialize a vault in your project
@@ -33,6 +65,11 @@ wormhole end
 
 | Command | What it does |
 |---------|-------------|
+| `wormhole up` | Start background daemon (multi-project watching + auto-harvest) |
+| `wormhole down` | Stop the background daemon |
+| `wormhole daemon-status` | Show daemon state and tracked project count |
+| `wormhole mcp` | Start MCP server on stdio (called by Claude Code) |
+| `wormhole mcp install` | Register Wormhole as MCP server in `~/.claude.json` |
 | `wormhole init` | Initialize a `.wormhole/` vault in the current project |
 | `wormhole start` | Compile context and launch an AI tool session |
 | `wormhole end` | Harvest knowledge and rebuild manifest after a session |
@@ -62,9 +99,22 @@ The harvester reads AI session transcripts (currently Claude Code JSONL) and ext
 
 Transcripts are redacted (API keys, JWTs, private keys stripped) before any LLM API call. Low-confidence blocks go to staging for manual review.
 
-**Passive mode:** `wormhole watch` or `wormhole install-hooks claude` auto-harvest without manual `wormhole end`.
+**Passive mode:** `wormhole watch`, `wormhole install-hooks claude`, or the background daemon (`wormhole up`) auto-harvest without manual `wormhole end`.
 
 To enable LLM extraction: `pip install wormhole-ai[llm]` and `wormhole config set llm.enabled true`.
+
+### MCP Server
+
+The MCP server lets Claude Code query your vault live, mid-session. Run `wormhole mcp install` to register it. Claude Code spawns the server as a subprocess and gets 4 tools:
+
+- **query_vault** ... list blocks, optionally filtered by category or keyword
+- **get_block** ... full content of a specific block by title
+- **search_vault** ... regex search across all blocks
+- **list_projects** ... all projects tracked by the daemon
+
+### Global Config
+
+Daemon and discovery settings live in `~/.wormhole/config.yaml`. Per-project settings in `.wormhole/config.yaml` override global defaults. Three-level merge: hardcoded defaults < global `project_defaults` < per-project config.
 
 ### Scoring
 
