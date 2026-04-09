@@ -172,7 +172,11 @@ def list_blocks(
     if category:
         search_dirs = [vault_path / category]
     else:
-        search_dirs = [d for d in vault_path.iterdir() if d.is_dir()]
+        search_dirs = [
+            d
+            for d in vault_path.iterdir()
+            if d.is_dir() and d.name in VALID_CATEGORIES
+        ]
 
     for directory in search_dirs:
         if not directory.exists():
@@ -227,9 +231,9 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _has_negation(text: str) -> bool:
-    """Check if text contains negation words."""
-    lower = text.lower()
-    return any(word in lower for word in NEGATION_WORDS)
+    """Check if text contains negation words (whole-word match)."""
+    words = set(text.lower().split())
+    return bool(words & NEGATION_WORDS)
 
 
 def deduplicate(

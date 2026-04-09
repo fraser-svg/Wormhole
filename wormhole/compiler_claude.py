@@ -3,7 +3,6 @@
 from pathlib import Path
 
 from wormhole.compiler_base import BaseCompiler
-from wormhole.config import Config
 
 
 class ClaudeCompiler(BaseCompiler):
