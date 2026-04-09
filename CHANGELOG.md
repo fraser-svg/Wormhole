@@ -19,4 +19,11 @@ All notable changes to this project will be documented in this file.
 - Path traversal prevention on all file writes
 - Harvest idempotency (tracks last-harvested session ID so you don't re-process)
 - First-run experience: example blocks and project-goal stub on `wormhole init`
-- 53 tests covering all modules
+- 82 tests covering all modules
+
+### Fixed
+- Negation detection in deduplication now uses whole-word matching (previously "knowledge" falsely matched "no")
+- `list_blocks` no longer leaks staged (unreviewed) blocks into compiled context
+- `$EDITOR` values with flags (e.g., `code --wait`) now handled correctly via `shlex.split`
+- `end` command wraps manifest/index rebuild in error handling
+- Removed unused `Config` imports from compiler subclasses
