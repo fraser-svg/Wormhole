@@ -2,6 +2,7 @@
 
 import os
 import textwrap
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -14,13 +15,30 @@ from wormhole.cli import main
 from wormhole.compiler_base import SENTINEL_END, SENTINEL_START, BaseCompiler
 from wormhole.compiler_claude import ClaudeCompiler
 from wormhole.compiler_cursor import CursorCompiler
-from wormhole.config import Config, load_config, save_config
+from wormhole.config import Config, _deep_merge, load_config, save_config
 from wormhole.harvester_base import BaseHarvester
 from wormhole.harvester_claude import ClaudeHarvester
 from wormhole.manifest import build_manifest
-from wormhole.scoring import get_changed_files, score_block, select_blocks
+from wormhole.scoring import (
+    _build_ref_counts,
+    _content_hash,
+    build_index,
+    get_changed_files,
+    load_index,
+    score_block,
+    select_blocks,
+)
 from wormhole.utils import estimate_tokens, format_error, sanitize_slug, validate_path_within
-from wormhole.vault import Block, deduplicate, list_blocks, parse_filename, read_block, write_block
+from wormhole.vault import (
+    Block,
+    _has_negation,
+    _tokenize,
+    deduplicate,
+    list_blocks,
+    parse_filename,
+    read_block,
+    write_block,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -717,3 +735,341 @@ class TestCLI:
             assert block is not None
             assert block.title == "My Decision"
             assert block.category == "decisions"
+
+
+# ===========================================================================
+# Coverage expansion tests
+# ===========================================================================
+
+
+class TestDeepMerge:
+    def test_simple_override(self) -> None:
+        defaults = {"a": 1, "b": 2}
+        overrides = {"b": 3}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": 1, "b": 3}
+
+    def test_nested_merge(self) -> None:
+        defaults = {"a": {"x": 1, "y": 2}, "b": 3}
+        overrides = {"a": {"y": 99}}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": {"x": 1, "y": 99}, "b": 3}
+
+    def test_new_key(self) -> None:
+        defaults = {"a": 1}
+        overrides = {"b": 2}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": 1, "b": 2}
+
+    def test_override_dict_with_scalar(self) -> None:
+        defaults = {"a": {"x": 1}}
+        overrides = {"a": "flat"}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": "flat"}
+
+
+class TestLoadConfigEdgeCases:
+    def test_non_dict_yaml(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        (vault / "config.yaml").write_text("- just\n- a\n- list\n")
+        cfg = load_config(vault)
+        assert isinstance(cfg, Config)
+        assert cfg.default_tool == ""
+
+    def test_missing_file(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        cfg = load_config(vault)
+        assert isinstance(cfg, Config)
+
+
+class TestTokenize:
+    def test_basic(self) -> None:
+        result = _tokenize("Hello World")
+        assert result == {"hello", "world"}
+
+    def test_empty(self) -> None:
+        result = _tokenize("")
+        assert result == set()
+
+
+class TestHasNegation:
+    def test_with_negation(self) -> None:
+        assert _has_negation("do not use SQLite") is True
+
+    def test_without_negation(self) -> None:
+        assert _has_negation("use PostgreSQL") is False
+
+    def test_contraction(self) -> None:
+        assert _has_negation("don't use SQLite") is True
+
+    def test_no_substring_false_positive(self) -> None:
+        assert _has_negation("knowledge notification annotate") is False
+
+
+class TestDeduplicateEdgeCases:
+    def test_category_mismatch_accepts(self) -> None:
+        new = Block(title="same title", category="decisions", content="same content")
+        existing = [Block(title="same title", category="corrections", content="same content")]
+        assert deduplicate(new, existing) == "accept"
+
+    def test_negation_mismatch_accepts(self) -> None:
+        new = Block(title="do not use Redis", category="decisions", content="avoid Redis")
+        existing = [Block(title="use Redis", category="decisions", content="Redis is good")]
+        assert deduplicate(new, existing) == "accept"
+
+    def test_empty_content_accepts(self) -> None:
+        new = Block(title="", category="decisions", content="")
+        existing = [Block(title="", category="decisions", content="")]
+        assert deduplicate(new, existing) == "accept"
+
+
+class TestBuildRefCounts:
+    def test_counts_references(self) -> None:
+        blocks = [
+            Block(title="A", category="decisions", content="a", related=["path/b.md"]),
+            Block(title="B", category="decisions", content="b", supersedes="path/a.md"),
+        ]
+        paths = ["path/a.md", "path/b.md"]
+        counts = _build_ref_counts(blocks, paths)
+        assert counts["path/a.md"] == 1
+        assert counts["path/b.md"] == 1
+
+    def test_no_references(self) -> None:
+        blocks = [Block(title="A", category="decisions", content="a")]
+        paths = ["path/a.md"]
+        counts = _build_ref_counts(blocks, paths)
+        assert counts["path/a.md"] == 0
+
+
+class TestScoreBlockEdgeCases:
+    def test_invalid_date(self) -> None:
+        block = Block(title="t", category="decisions", content="c", date="not-a-date")
+        config = Config()
+        score = score_block(block, config, [], [])
+        assert score > 0
+
+    def test_no_date(self) -> None:
+        block = Block(title="t", category="decisions", content="c", date="")
+        config = Config()
+        score = score_block(block, config, [], [])
+        assert score > 0
+
+    def test_with_ref_counts(self) -> None:
+        block = Block(title="t", category="decisions", content="c")
+        config = Config()
+        ref_counts = {"block.md": 5}
+        score = score_block(
+            block, config, [], [], block_path="block.md", ref_counts=ref_counts
+        )
+        assert score > 0
+
+
+class TestContentHash:
+    def test_deterministic(self) -> None:
+        block = Block(title="t", category="decisions", content="hello world")
+        h1 = _content_hash(block)
+        h2 = _content_hash(block)
+        assert h1 == h2
+        assert len(h1) == 16
+
+    def test_different_content(self) -> None:
+        b1 = Block(title="t", category="decisions", content="hello")
+        b2 = Block(title="t", category="decisions", content="world")
+        assert _content_hash(b1) != _content_hash(b2)
+
+
+class TestBuildAndLoadIndex:
+    def test_roundtrip(self, vault: Path) -> None:
+        blocks = [
+            (vault / "decisions" / "test.md", Block(title="t", category="decisions", content="c")),
+        ]
+        build_index(vault, blocks)
+        data = load_index(vault)
+        assert data is not None
+        assert len(data["blocks"]) == 1
+        assert data["blocks"][0]["title"] == "t"
+
+    def test_load_missing(self, tmp_path: Path) -> None:
+        assert load_index(tmp_path) is None
+
+    def test_load_corrupt_json(self, tmp_path: Path) -> None:
+        (tmp_path / ".index.json").write_text("{not valid json!!")
+        assert load_index(tmp_path) is None
+
+    def test_load_non_list(self, tmp_path: Path) -> None:
+        (tmp_path / ".index.json").write_text('{"not": "a list"}')
+        assert load_index(tmp_path) is None
+
+
+class TestSelectBlocksBudget:
+    def test_budget_overflow(self) -> None:
+        config = Config()
+        config.budgets["generic"] = 10
+        blocks = [
+            (Path("a.md"), Block(title="t", category="decisions", content="x " * 100)),
+        ]
+        with patch("wormhole.scoring.get_changed_files", return_value=[]):
+            result = select_blocks(blocks, config, "generic")
+        assert len(result) == 0
+
+    def test_generic_fallback(self) -> None:
+        config = Config()
+        blocks = [
+            (Path("a.md"), Block(title="t", category="decisions", content="short")),
+        ]
+        with patch("wormhole.scoring.get_changed_files", return_value=[]):
+            result = select_blocks(blocks, config, "unknown_tool")
+        assert len(result) == 1
+
+
+class TestHookScript:
+    """Tests for the install-hooks command and hook script generation."""
+
+    def test_hook_uses_group_option_ordering(self) -> None:
+        """--quiet must come before 'end' (Click group option)."""
+        from wormhole.cli import _HOOK_SCRIPT
+        # The template should have --quiet before 'end'
+        rendered = _HOOK_SCRIPT.format(marker="# test", tool="claude")
+        assert "wormhole --quiet end claude" in rendered
+        assert "end --quiet" not in rendered
+
+    def test_hook_includes_tool_arg(self) -> None:
+        """Hook must pass a tool name so _resolve_tool doesn't fail."""
+        from wormhole.cli import _HOOK_SCRIPT
+        rendered = _HOOK_SCRIPT.format(marker="# test", tool="claude")
+        assert "end claude" in rendered
+
+    def test_install_hooks_requires_tool(self, tmp_path: Path) -> None:
+        """install-hooks with no tool and no default_tool should fail."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            # Create .git dir
+            (Path(td) / ".git" / "hooks").mkdir(parents=True)
+            result = runner.invoke(main, ["install-hooks"])
+            # Should fail: no tool, no default_tool
+            assert result.exit_code == 3  # EXIT_CONFIG
+
+    def test_install_hooks_with_tool(self, tmp_path: Path) -> None:
+        """install-hooks with explicit tool should produce correct hook."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            (Path(td) / ".git" / "hooks").mkdir(parents=True)
+            result = runner.invoke(main, ["install-hooks", "claude"])
+            assert result.exit_code == 0
+            hook = (Path(td) / ".git" / "hooks" / "post-commit").read_text()
+            assert "wormhole --quiet end claude" in hook
+
+
+class TestConfigBooleanCoercion:
+    """Config set must handle boolean strings correctly."""
+
+    def test_false_stored_as_bool(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            result = runner.invoke(main, ["config", "set", "llm.enabled", "false"])
+            assert result.exit_code == 0
+            # Verify it's stored as actual False, not string "false"
+            config = load_config(Path(td) / ".wormhole")
+            assert config.llm["enabled"] is False
+
+    def test_true_stored_as_bool(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            result = runner.invoke(main, ["config", "set", "llm.enabled", "true"])
+            assert result.exit_code == 0
+            config = load_config(Path(td) / ".wormhole")
+            assert config.llm["enabled"] is True
+
+
+class TestUninstallHooks:
+    def test_uninstall_removes_hook(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            (Path(td) / ".git" / "hooks").mkdir(parents=True)
+            runner.invoke(main, ["install-hooks", "claude"])
+            result = runner.invoke(main, ["uninstall-hooks"])
+            assert result.exit_code == 0
+            assert not (Path(td) / ".git" / "hooks" / "post-commit").exists()
+
+    def test_uninstall_restores_local(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            hooks_dir = Path(td) / ".git" / "hooks"
+            hooks_dir.mkdir(parents=True)
+            # Create an existing hook first
+            original = hooks_dir / "post-commit"
+            original.write_text("#!/bin/sh\necho original\n")
+            original.chmod(0o755)
+            runner.invoke(main, ["init"])
+            runner.invoke(main, ["install-hooks", "claude"])
+            # Original should be renamed to .local
+            assert (hooks_dir / "post-commit.local").exists()
+            result = runner.invoke(main, ["uninstall-hooks"])
+            assert result.exit_code == 0
+            restored = (hooks_dir / "post-commit").read_text()
+            assert "original" in restored
+
+    def test_uninstall_no_git(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(main, ["uninstall-hooks"])
+            assert result.exit_code == 1
+
+
+class TestHarvestLockAndState:
+    def test_acquire_and_release_lock(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        fd = harvester._acquire_lock()
+        assert fd is not None
+        # Lock file should exist
+        assert (vault / ".harvest-lock").exists()
+        harvester._release_lock(fd)
+
+    def test_stale_lock_broken(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        lock_path = vault / ".harvest-lock"
+        lock_path.write_text("stale")
+        # Set mtime to 10 minutes ago
+        import os
+        old_time = time.time() - 600
+        os.utime(lock_path, (old_time, old_time))
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        fd = harvester._acquire_lock()
+        assert fd is not None
+        harvester._release_lock(fd)
+
+    def test_harvest_state_roundtrip(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        assert harvester._get_harvest_state() == ""
+        harvester._set_harvest_state("session-123")
+        assert harvester._get_harvest_state() == "session-123"
+
+    def test_llm_extract_disabled(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        # LLM disabled by default
+        result = harvester._llm_extract([{"role": "assistant", "content": "test"}])
+        assert result == []
+
+
+class TestParseFilenameEdgeCases:
+    def test_single_segment(self) -> None:
+        result = parse_filename("simple.md")
+        assert result["slug"] == "simple"
