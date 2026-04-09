@@ -23,7 +23,7 @@ from wormhole.harvester_claude import ClaudeHarvester
 from wormhole.manifest import build_manifest, write_manifest
 from wormhole.scoring import build_index
 from wormhole.utils import format_error
-from wormhole.vault import VALID_CATEGORIES, Block, list_blocks, read_block, write_block
+from wormhole.vault import VALID_CATEGORIES, Block, init_vault, list_blocks, read_block, write_block
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +46,6 @@ _COMPILERS: dict[str, type[BaseCompiler]] = {
 _HARVESTERS: dict[str, type[BaseHarvester]] = {
     "claude": ClaudeHarvester,
 }
-
-_CATEGORY_DIRS = [
-    "decisions",
-    "corrections",
-    "discoveries",
-    "architecture",
-    "failures",
-    "context",
-    "staging",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -148,78 +138,19 @@ def main(ctx: click.Context, verbose: bool, quiet: bool, dry_run: bool) -> None:
 @click.pass_context
 def init(ctx: click.Context) -> None:
     """Initialize a new .wormhole/ vault in the current directory."""
-    vault_path = Path.cwd() / _VAULT_DIR
-
-    if vault_path.exists():
-        console.print(
-            f"[yellow]{format_error('Already initialized', f'{vault_path} already exists', 'Remove it first or use existing vault')}[/yellow]"
-        )
-        raise SystemExit(EXIT_GENERAL)
-
     dry_run = ctx.obj.get("dry_run", False)
 
     if dry_run:
         console.print("[dim]Dry run: would create .wormhole/ directory structure[/dim]")
         return
 
-    # Create directory structure
-    vault_path.mkdir(parents=True)
-    for subdir in _CATEGORY_DIRS:
-        (vault_path / subdir).mkdir()
-
-    # Write config.yaml with defaults
-    config = Config()
-    save_config(config, vault_path)
-
-    # Write .version file
-    (vault_path / ".version").write_text("1\n", encoding="utf-8")
-
-    # Write context/project-goal.md stub
-    goal_content = """\
----
-title: Project Goal
-category: context
-confidence: 1.0
----
-Describe your project's purpose, target users, and key constraints here.
-This file is always included in compiled context.
-"""
-    (vault_path / "context" / "project-goal.md").write_text(goal_content, encoding="utf-8")
-
-    # Write example decision block
-    today = date.today().isoformat()
-    example_block = f"""\
----
-title: Example Decision
-date: {today}
-session: manual
-category: decisions
-files: []
-confidence: 1.0
----
-
-## Decision
-This is an example decision block. Replace or delete it.
-
-## Reasoning
-Wormhole creates this example so your first `wormhole boot` produces useful output.
-"""
-    (vault_path / "decisions" / f"{today}--decisions--example-decision.md").write_text(
-        example_block, encoding="utf-8"
-    )
-
-    # Add .wormhole/ to .gitignore
-    gitignore_path = Path.cwd() / ".gitignore"
-    gitignore_entry = ".wormhole/\n"
-    if gitignore_path.exists():
-        existing = gitignore_path.read_text(encoding="utf-8")
-        if ".wormhole/" not in existing:
-            with gitignore_path.open("a", encoding="utf-8") as f:
-                if existing and not existing.endswith("\n"):
-                    f.write("\n")
-                f.write(gitignore_entry)
-    else:
-        gitignore_path.write_text(gitignore_entry, encoding="utf-8")
+    try:
+        init_vault(Path.cwd())
+    except FileExistsError as exc:
+        console.print(
+            f"[yellow]{format_error('Already initialized', str(exc), 'Remove it first or use existing vault')}[/yellow]"
+        )
+        raise SystemExit(EXIT_GENERAL) from exc
 
     console.print(
         Panel(
@@ -806,3 +737,74 @@ def uninstall_hooks(ctx: click.Context) -> None:
         console.print("[green]Restored original post-commit hook.[/green]")
     else:
         console.print("[green]Removed wormhole post-commit hook.[/green]")
+
+
+# ---------------------------------------------------------------------------
+# wormhole up / down / daemon-status
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize).")
+@click.pass_context
+def up(ctx: click.Context, foreground: bool) -> None:
+    """Start the Wormhole background daemon."""
+    from wormhole.daemon import start_daemon
+
+    pid = start_daemon(foreground=foreground)
+    if not foreground:
+        console.print(f"[green]Daemon started (PID {pid})[/green]")
+
+
+@main.command()
+@click.pass_context
+def down(ctx: click.Context) -> None:
+    """Stop the Wormhole background daemon."""
+    from wormhole.daemon import stop_daemon
+
+    if stop_daemon():
+        console.print("[green]Daemon stopped.[/green]")
+    else:
+        console.print("[dim]Daemon not running.[/dim]")
+
+
+@main.command("daemon-status")
+@click.pass_context
+def daemon_status_cmd(ctx: click.Context) -> None:
+    """Show daemon status and tracked projects."""
+    from wormhole.daemon import daemon_status
+
+    info = daemon_status()
+    if info["running"]:
+        console.print(f"[green]Daemon running[/green] (PID {info['pid']})")
+    else:
+        console.print("[dim]Daemon not running.[/dim]")
+    console.print(f"Tracked projects: [bold]{info['projects']}[/bold]")
+
+
+# ---------------------------------------------------------------------------
+# wormhole mcp
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("action", required=False, default="run", type=click.Choice(["run", "install"]))
+@click.pass_context
+def mcp(ctx: click.Context, action: str) -> None:
+    """MCP server for live vault queries.
+
+    \b
+    run      Start MCP server on stdio (called by Claude Code).
+    install  Register Wormhole as an MCP server in Claude Code config.
+    """
+    if action == "install":
+        from wormhole.mcp_server import install_mcp_config
+
+        if install_mcp_config():
+            console.print("[green]Registered Wormhole MCP server in ~/.claude.json[/green]")
+        else:
+            console.print("[dim]Wormhole MCP server already registered.[/dim]")
+    else:
+        from wormhole.mcp_server import run_stdio
+
+        run_stdio()
