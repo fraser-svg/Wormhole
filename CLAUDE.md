@@ -39,7 +39,7 @@ wormhole/                # Main package
   harvester_claude.py    # Claude JSONL transcript harvester
   utils.py               # Shared utilities
 tests/
-  test_wormhole.py       # 53 tests
+  test_wormhole.py       # 82 tests
 ```
 
 ## Development
