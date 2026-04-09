@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -304,12 +305,16 @@ def end(ctx: click.Context, tool: str | None) -> None:
         )
         raise SystemExit(EXIT_HARVEST) from exc
 
-    # Rebuild manifest
+    # Rebuild manifest and index
     all_blocks = list_blocks(vault_path)
-    write_manifest(vault_path, all_blocks)
-
-    # Rebuild index
-    build_index(vault_path, all_blocks)
+    try:
+        write_manifest(vault_path, all_blocks)
+        build_index(vault_path, all_blocks)
+    except OSError as exc:
+        console.print(
+            f"[red]{format_error('Rebuild failed', str(exc), 'Check file permissions')}[/red]"
+        )
+        raise SystemExit(EXIT_GENERAL) from exc
 
     console.print(
         Panel(
@@ -531,7 +536,7 @@ def config_cmd(ctx: click.Context, action: str, key: str | None, value: str | No
         editor = os.environ.get("EDITOR", "vi")
         config_file = vault_path / "config.yaml"
         try:
-            subprocess.run([editor, str(config_file)], check=True)
+            subprocess.run([*shlex.split(editor), str(config_file)], check=True)
         except (subprocess.SubprocessError, FileNotFoundError) as exc:
             console.print(
                 f"[red]{format_error('Editor failed', str(exc), f'Set $EDITOR or edit {config_file} manually')}[/red]"
@@ -573,7 +578,7 @@ def new_block(ctx: click.Context, category: str, title: str) -> None:
     editor = os.environ.get("EDITOR")
     if editor:
         try:
-            subprocess.run([editor, str(file_path)], check=True)
+            subprocess.run([*shlex.split(editor), str(file_path)], check=True)
         except (subprocess.SubprocessError, FileNotFoundError):
             pass  # Non-critical: block already written
 
@@ -648,7 +653,7 @@ def review(ctx: click.Context) -> None:
         elif action == "edit":
             editor = os.environ.get("EDITOR", "vi")
             try:
-                subprocess.run([editor, str(path)], check=True)
+                subprocess.run([*shlex.split(editor), str(path)], check=True)
             except (subprocess.SubprocessError, FileNotFoundError):
                 console.print("[yellow]Editor failed. Block left in staging.[/yellow]")
                 continue
