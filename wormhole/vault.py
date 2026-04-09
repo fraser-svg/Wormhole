@@ -3,6 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -288,3 +289,92 @@ def deduplicate(
             return "replace"
 
     return "accept"
+
+
+_VAULT_DIR = ".wormhole"
+
+_CATEGORY_DIRS = [
+    "decisions",
+    "corrections",
+    "discoveries",
+    "architecture",
+    "failures",
+    "context",
+    "staging",
+]
+
+
+def init_vault(project_path: Path) -> Path:
+    """Create .wormhole/ vault structure at *project_path*.
+
+    Creates category directories, writes default config, schema version,
+    example blocks, and adds .wormhole/ to .gitignore.
+
+    Returns the vault path.  Raises FileExistsError if vault already exists.
+    """
+    from wormhole.config import Config, save_config
+
+    vault_path = project_path / _VAULT_DIR
+
+    if vault_path.exists():
+        raise FileExistsError(f"{vault_path} already exists")
+
+    vault_path.mkdir(parents=True)
+    for subdir in _CATEGORY_DIRS:
+        (vault_path / subdir).mkdir()
+
+    # Default config
+    save_config(Config(), vault_path)
+
+    # Schema version
+    (vault_path / ".version").write_text("1\n", encoding="utf-8")
+
+    # Context stub
+    goal_content = """\
+---
+title: Project Goal
+category: context
+confidence: 1.0
+---
+Describe your project's purpose, target users, and key constraints here.
+This file is always included in compiled context.
+"""
+    (vault_path / "context" / "project-goal.md").write_text(goal_content, encoding="utf-8")
+
+    # Example decision block
+    today = date.today().isoformat()
+    example_block = f"""\
+---
+title: Example Decision
+date: {today}
+session: manual
+category: decisions
+files: []
+confidence: 1.0
+---
+
+## Decision
+This is an example decision block. Replace or delete it.
+
+## Reasoning
+Wormhole creates this example so your first `wormhole boot` produces useful output.
+"""
+    (vault_path / "decisions" / f"{today}--decisions--example-decision.md").write_text(
+        example_block, encoding="utf-8"
+    )
+
+    # Add to .gitignore
+    gitignore_path = project_path / ".gitignore"
+    gitignore_entry = ".wormhole/\n"
+    if gitignore_path.exists():
+        existing = gitignore_path.read_text(encoding="utf-8")
+        if ".wormhole/" not in existing:
+            with gitignore_path.open("a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(gitignore_entry)
+    else:
+        gitignore_path.write_text(gitignore_entry, encoding="utf-8")
+
+    logger.info("Initialized vault at %s", vault_path)
+    return vault_path
