@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Background daemon: `wormhole up` / `wormhole down` for persistent multi-project watching
 - Auto-init: daemon discovers projects from `~/.claude/projects/` and creates `.wormhole/` automatically
-- Multi-project watcher: `MultiProjectWatcher` manages N project watchers simultaneously
+- Multi-project watcher: daemon watches all your projects simultaneously
 - Project registry: tracks discovered projects in `~/.wormhole/projects.json`
 - MCP server: `wormhole mcp` exposes vault queries to Claude Code via stdio transport
 - MCP tools: `query_vault`, `get_block`, `search_vault`, `list_projects`
@@ -18,7 +18,7 @@ All notable changes to this project will be documented in this file.
 - 43 new tests (186 total) covering daemon, registry, multi-watcher, and MCP server
 
 ### Changed
-- `init_vault()` extracted from CLI into `vault.py` for reuse by daemon auto-init
+- Vault initialization extracted into reusable `init_vault()` for daemon auto-init
 - `mcp` optional dependency group: `pip install wormhole-ai[mcp]`
 - MCP server validates project paths (resolve + absolute + directory check) against path traversal
 - Regex pattern length capped at 1000 chars in `search_vault` to prevent ReDoS
