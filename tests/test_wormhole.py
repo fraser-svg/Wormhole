@@ -14,13 +14,30 @@ from wormhole.cli import main
 from wormhole.compiler_base import SENTINEL_END, SENTINEL_START, BaseCompiler
 from wormhole.compiler_claude import ClaudeCompiler
 from wormhole.compiler_cursor import CursorCompiler
-from wormhole.config import Config, load_config, save_config
+from wormhole.config import Config, _deep_merge, load_config, save_config
 from wormhole.harvester_base import BaseHarvester
 from wormhole.harvester_claude import ClaudeHarvester
 from wormhole.manifest import build_manifest
-from wormhole.scoring import get_changed_files, score_block, select_blocks
+from wormhole.scoring import (
+    _build_ref_counts,
+    _content_hash,
+    build_index,
+    get_changed_files,
+    load_index,
+    score_block,
+    select_blocks,
+)
 from wormhole.utils import estimate_tokens, format_error, sanitize_slug, validate_path_within
-from wormhole.vault import Block, deduplicate, list_blocks, parse_filename, read_block, write_block
+from wormhole.vault import (
+    Block,
+    _has_negation,
+    _tokenize,
+    deduplicate,
+    list_blocks,
+    parse_filename,
+    read_block,
+    write_block,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -717,3 +734,199 @@ class TestCLI:
             assert block is not None
             assert block.title == "My Decision"
             assert block.category == "decisions"
+
+
+# ===========================================================================
+# Coverage expansion tests
+# ===========================================================================
+
+
+class TestDeepMerge:
+    def test_simple_override(self) -> None:
+        defaults = {"a": 1, "b": 2}
+        overrides = {"b": 3}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": 1, "b": 3}
+
+    def test_nested_merge(self) -> None:
+        defaults = {"a": {"x": 1, "y": 2}, "b": 3}
+        overrides = {"a": {"y": 99}}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": {"x": 1, "y": 99}, "b": 3}
+
+    def test_new_key(self) -> None:
+        defaults = {"a": 1}
+        overrides = {"b": 2}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": 1, "b": 2}
+
+    def test_override_dict_with_scalar(self) -> None:
+        defaults = {"a": {"x": 1}}
+        overrides = {"a": "flat"}
+        result = _deep_merge(defaults, overrides)
+        assert result == {"a": "flat"}
+
+
+class TestLoadConfigEdgeCases:
+    def test_non_dict_yaml(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        (vault / "config.yaml").write_text("- just\n- a\n- list\n")
+        cfg = load_config(vault)
+        assert isinstance(cfg, Config)
+        assert cfg.default_tool == ""
+
+    def test_missing_file(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        cfg = load_config(vault)
+        assert isinstance(cfg, Config)
+
+
+class TestTokenize:
+    def test_basic(self) -> None:
+        result = _tokenize("Hello World")
+        assert result == {"hello", "world"}
+
+    def test_empty(self) -> None:
+        result = _tokenize("")
+        assert result == set()
+
+
+class TestHasNegation:
+    def test_with_negation(self) -> None:
+        assert _has_negation("do not use SQLite") is True
+
+    def test_without_negation(self) -> None:
+        assert _has_negation("use PostgreSQL") is False
+
+    def test_contraction(self) -> None:
+        assert _has_negation("don't use SQLite") is True
+
+    def test_no_substring_false_positive(self) -> None:
+        assert _has_negation("knowledge notification annotate") is False
+
+
+class TestDeduplicateEdgeCases:
+    def test_category_mismatch_accepts(self) -> None:
+        new = Block(title="same title", category="decisions", content="same content")
+        existing = [Block(title="same title", category="corrections", content="same content")]
+        assert deduplicate(new, existing) == "accept"
+
+    def test_negation_mismatch_accepts(self) -> None:
+        new = Block(title="do not use Redis", category="decisions", content="avoid Redis")
+        existing = [Block(title="use Redis", category="decisions", content="Redis is good")]
+        assert deduplicate(new, existing) == "accept"
+
+    def test_empty_content_accepts(self) -> None:
+        new = Block(title="", category="decisions", content="")
+        existing = [Block(title="", category="decisions", content="")]
+        # Empty tokens case
+        assert deduplicate(new, existing) == "accept"
+
+
+class TestBuildRefCounts:
+    def test_counts_references(self) -> None:
+        blocks = [
+            Block(title="A", category="decisions", content="a", related=["path/b.md"]),
+            Block(title="B", category="decisions", content="b", supersedes="path/a.md"),
+        ]
+        paths = ["path/a.md", "path/b.md"]
+        counts = _build_ref_counts(blocks, paths)
+        assert counts["path/a.md"] == 1  # referenced by B's supersedes
+        assert counts["path/b.md"] == 1  # referenced by A's related
+
+    def test_no_references(self) -> None:
+        blocks = [Block(title="A", category="decisions", content="a")]
+        paths = ["path/a.md"]
+        counts = _build_ref_counts(blocks, paths)
+        assert counts["path/a.md"] == 0
+
+
+class TestScoreBlockEdgeCases:
+    def test_invalid_date(self) -> None:
+        block = Block(title="t", category="decisions", content="c", date="not-a-date")
+        config = Config()
+        score = score_block(block, config, [], [])
+        assert score > 0  # falls back to days=0
+
+    def test_no_date(self) -> None:
+        block = Block(title="t", category="decisions", content="c", date="")
+        config = Config()
+        score = score_block(block, config, [], [])
+        assert score > 0  # recency defaults to 0.5
+
+    def test_with_ref_counts(self) -> None:
+        block = Block(title="t", category="decisions", content="c")
+        config = Config()
+        ref_counts = {"block.md": 5}
+        score = score_block(
+            block, config, [], [], block_path="block.md", ref_counts=ref_counts
+        )
+        assert score > 0
+
+
+class TestContentHash:
+    def test_deterministic(self) -> None:
+        block = Block(title="t", category="decisions", content="hello world")
+        h1 = _content_hash(block)
+        h2 = _content_hash(block)
+        assert h1 == h2
+        assert len(h1) == 16
+
+    def test_different_content(self) -> None:
+        b1 = Block(title="t", category="decisions", content="hello")
+        b2 = Block(title="t", category="decisions", content="world")
+        assert _content_hash(b1) != _content_hash(b2)
+
+
+class TestBuildAndLoadIndex:
+    def test_roundtrip(self, vault: Path) -> None:
+        blocks = [
+            (vault / "decisions" / "test.md", Block(title="t", category="decisions", content="c")),
+        ]
+        build_index(vault, blocks)
+        data = load_index(vault)
+        assert data is not None
+        assert len(data["blocks"]) == 1
+        assert data["blocks"][0]["title"] == "t"
+
+    def test_load_missing(self, tmp_path: Path) -> None:
+        assert load_index(tmp_path) is None
+
+    def test_load_corrupt_json(self, tmp_path: Path) -> None:
+        (tmp_path / ".index.json").write_text("{not valid json!!")
+        assert load_index(tmp_path) is None
+
+    def test_load_non_list(self, tmp_path: Path) -> None:
+        (tmp_path / ".index.json").write_text('{"not": "a list"}')
+        assert load_index(tmp_path) is None
+
+
+class TestSelectBlocksBudget:
+    def test_budget_overflow(self) -> None:
+        """Blocks exceeding budget are excluded."""
+        config = Config()
+        config.budgets["generic"] = 10  # tiny budget
+        blocks = [
+            (Path("a.md"), Block(title="t", category="decisions", content="x " * 100)),
+        ]
+        with patch("wormhole.scoring.get_changed_files", return_value=[]):
+            result = select_blocks(blocks, config, "generic")
+        assert len(result) == 0
+
+    def test_generic_fallback(self) -> None:
+        """Unknown tool falls back to generic budget."""
+        config = Config()
+        blocks = [
+            (Path("a.md"), Block(title="t", category="decisions", content="short")),
+        ]
+        with patch("wormhole.scoring.get_changed_files", return_value=[]):
+            result = select_blocks(blocks, config, "unknown_tool")
+        assert len(result) == 1
+
+
+class TestParseFilenameEdgeCases:
+    def test_single_segment(self) -> None:
+        result = parse_filename("simple.md")
+        assert result["slug"] == "simple"
