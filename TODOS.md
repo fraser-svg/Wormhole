@@ -2,11 +2,12 @@
 
 ## Core
 
-- [ ] **Priority: P1** LLM-assisted extraction (upgrade from trigger phrases) — highest-risk area per review
-- [ ] **Priority: P1** Passive harvesting via git hooks / filesystem watcher — reduce ceremony friction
+- [ ] **Priority: P1** Eval harness: golden transcript with precision/recall measurement (deferred from v0.2.0 plan)
+- [ ] **Priority: P1** Incremental offset-based harvesting for large transcripts (deferred from v0.2.0 plan)
+- [ ] **Priority: P1** README with quickstart + config reference (deferred from v0.2.0 plan)
 - [ ] **Priority: P2** MCP server / Claude Code extension integration — eliminate start/end ceremony entirely
 - [ ] **Priority: P2** CI/CD pipeline for PyPI publishing (GitHub Actions)
-- [ ] **Priority: P2** Secret detection scanner for harvested blocks
+- [ ] **Priority: P2** Multi-provider LLM abstraction (OpenAI, Ollama) — v0.3.0
 
 ## CLI
 
@@ -34,3 +35,8 @@
 - [ ] **Priority: P3** Content validation / prompt injection detection for team vaults
 
 ## Completed
+
+- [x] **Completed: v0.2.0.0 (2026-04-09)** LLM-assisted extraction (Anthropic Haiku, hybrid pipeline)
+- [x] **Completed: v0.2.0.0 (2026-04-09)** Passive harvesting via git hooks / filesystem watcher
+- [x] **Completed: v0.2.0.0 (2026-04-09)** Transcript redaction (API keys, JWTs, private keys, env secrets)
+- [x] **Completed: v0.2.0.0 (2026-04-09)** Lockfile single-writer guarantee with stale lock detection
