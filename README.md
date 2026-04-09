@@ -43,6 +43,9 @@ wormhole end
 | `wormhole config` | View or modify vault configuration (show, set, edit) |
 | `wormhole new` | Create a new knowledge block with scaffolded frontmatter |
 | `wormhole review` | Review staged blocks (low-confidence harvested blocks) |
+| `wormhole watch` | Passively watch for transcript changes and auto-harvest |
+| `wormhole install-hooks` | Install git post-commit hook for automatic harvesting |
+| `wormhole uninstall-hooks` | Remove wormhole git hooks and restore originals |
 
 ## How It Works
 
@@ -52,7 +55,16 @@ Knowledge lives in `.wormhole/` as structured markdown blocks with YAML frontmat
 
 ### Harvesting
 
-The harvester reads AI session transcripts (currently Claude Code JSONL), extracts knowledge using trigger-phrase detection with structural context validation, and scores confidence. Low-confidence blocks go to a staging directory for manual review.
+The harvester reads AI session transcripts (currently Claude Code JSONL) and extracts knowledge using a hybrid pipeline:
+
+1. **Trigger phrases** ... regex patterns detect decisions, corrections, discoveries, architecture notes, and failures
+2. **LLM extraction** (optional) ... Anthropic Haiku runs as a second pass to catch implicit knowledge that triggers miss
+
+Transcripts are redacted (API keys, JWTs, private keys stripped) before any LLM API call. Low-confidence blocks go to staging for manual review.
+
+**Passive mode:** `wormhole watch` or `wormhole install-hooks claude` auto-harvest without manual `wormhole end`.
+
+To enable LLM extraction: `pip install wormhole-ai[llm]` and `wormhole config set llm.enabled true`.
 
 ### Scoring
 

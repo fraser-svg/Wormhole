@@ -510,8 +510,10 @@ def config_cmd(ctx: click.Context, action: str, key: str | None, value: str | No
 
         final_key = parts[-1]
         if isinstance(target, dict):
-            # Type coercion: try int, then float, then string
-            if value.isdigit():
+            # Type coercion: booleans, int, float, string
+            if value.lower() in ("true", "false"):
+                target[final_key] = value.lower() == "true"
+            elif value.isdigit():
                 target[final_key] = int(value)
             else:
                 try:
@@ -669,3 +671,138 @@ def review(ctx: click.Context) -> None:
             console.print("[red]Rejected and deleted.[/red]")
 
         # skip: do nothing
+
+
+# ---------------------------------------------------------------------------
+# wormhole watch
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--interval", "-i", type=float, default=None, help="Poll interval in seconds.")
+@click.pass_context
+def watch(ctx: click.Context, interval: float | None) -> None:
+    """Passively watch for transcript changes and auto-harvest."""
+    vault_path = _get_vault_path()
+    config = load_config(vault_path)
+
+    if interval is not None:
+        config.watcher["poll_interval"] = interval
+
+    from wormhole.watcher import TranscriptWatcher
+
+    watcher = TranscriptWatcher(vault_path, config)
+    console.print(
+        f"[bold]Watching for transcript changes[/bold] "
+        f"(poll every {watcher.poll_interval:.1f}s, Ctrl+C to stop)"
+    )
+
+    try:
+        watcher.start()
+    except KeyboardInterrupt:
+        watcher.stop()
+        console.print("\n[dim]Watcher stopped.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# wormhole install-hooks
+# ---------------------------------------------------------------------------
+
+_HOOK_MARKER = "# wormhole-managed"
+
+_HOOK_SCRIPT = """\
+#!/bin/sh
+{marker}
+# Chain with existing hook if present
+if [ -f "$0.local" ]; then
+    "$0.local" "$@"
+fi
+wormhole --quiet end {tool} 2>/dev/null || true
+"""
+
+
+@main.command("install-hooks")
+@click.argument("tool", required=False, default=None)
+@click.pass_context
+def install_hooks(ctx: click.Context, tool: str | None) -> None:
+    """Install git post-commit hook for automatic harvesting."""
+    vault_path = _get_vault_path()
+    config = load_config(vault_path)
+    resolved_tool = _resolve_tool(tool, config)
+
+    git_dir = Path.cwd() / ".git"
+    if not git_dir.is_dir():
+        console.print(
+            f"[red]{format_error('Not a git repo', 'No .git/ directory found', 'Run from a git repository')}[/red]"
+        )
+        raise SystemExit(EXIT_GENERAL)
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    hook_path = hooks_dir / "post-commit"
+
+    dry_run = ctx.obj.get("dry_run", False)
+    if dry_run:
+        console.print("[dim]Dry run: would install post-commit hook[/dim]")
+        return
+
+    # Preserve existing hook
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8")
+        if _HOOK_MARKER in existing:
+            console.print("[yellow]Wormhole hook already installed.[/yellow]")
+            return
+        # Rename existing hook to .local
+        local_path = hook_path.with_suffix(".local")
+        hook_path.rename(local_path)
+        console.print(f"[dim]Existing hook moved to {local_path.name}[/dim]")
+
+    hook_path.write_text(
+        _HOOK_SCRIPT.format(marker=_HOOK_MARKER, tool=resolved_tool),
+        encoding="utf-8",
+    )
+    hook_path.chmod(0o755)
+    console.print("[green]Installed post-commit hook for auto-harvesting.[/green]")
+
+
+# ---------------------------------------------------------------------------
+# wormhole uninstall-hooks
+# ---------------------------------------------------------------------------
+
+
+@main.command("uninstall-hooks")
+@click.pass_context
+def uninstall_hooks(ctx: click.Context) -> None:
+    """Remove wormhole git hooks and restore originals."""
+    git_dir = Path.cwd() / ".git"
+    if not git_dir.is_dir():
+        console.print(
+            f"[red]{format_error('Not a git repo', 'No .git/ directory found', 'Run from a git repository')}[/red]"
+        )
+        raise SystemExit(EXIT_GENERAL)
+
+    hook_path = git_dir / "hooks" / "post-commit"
+    local_path = hook_path.with_suffix(".local")
+
+    dry_run = ctx.obj.get("dry_run", False)
+    if dry_run:
+        console.print("[dim]Dry run: would uninstall post-commit hook[/dim]")
+        return
+
+    if not hook_path.exists():
+        console.print("[dim]No post-commit hook found.[/dim]")
+        return
+
+    existing = hook_path.read_text(encoding="utf-8")
+    if _HOOK_MARKER not in existing:
+        console.print("[yellow]Post-commit hook not managed by wormhole.[/yellow]")
+        return
+
+    hook_path.unlink()
+
+    # Restore original if it was saved
+    if local_path.exists():
+        local_path.rename(hook_path)
+        console.print("[green]Restored original post-commit hook.[/green]")
+    else:
+        console.print("[green]Removed wormhole post-commit hook.[/green]")

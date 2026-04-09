@@ -50,6 +50,26 @@ _DEFAULT_HARVESTER: dict[str, float] = {
 
 
 @dataclass
+class LLMConfig:
+    """LLM extraction configuration."""
+
+    enabled: bool = False
+    model: str = "claude-haiku-4-5-20251001"
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    chunk_size: int = 4000
+    max_chunks: int = 20
+    temperature: float = 0.0
+
+
+@dataclass
+class WatcherConfig:
+    """Passive harvesting watcher configuration."""
+
+    poll_interval: float = 5.0
+    auto_manifest: bool = True
+
+
+@dataclass
 class Config:
     """Wormhole vault configuration with sensible defaults."""
 
@@ -65,6 +85,8 @@ class Config:
     harvester: dict[str, float] = field(
         default_factory=lambda: dict(_DEFAULT_HARVESTER)
     )
+    llm: dict[str, Any] = field(default_factory=lambda: asdict(LLMConfig()))
+    watcher: dict[str, Any] = field(default_factory=lambda: asdict(WatcherConfig()))
     default_tool: str = ""
     vault_version: str = "1"
 

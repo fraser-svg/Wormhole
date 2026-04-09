@@ -2,6 +2,7 @@
 
 import os
 import textwrap
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -821,7 +822,6 @@ class TestDeduplicateEdgeCases:
     def test_empty_content_accepts(self) -> None:
         new = Block(title="", category="decisions", content="")
         existing = [Block(title="", category="decisions", content="")]
-        # Empty tokens case
         assert deduplicate(new, existing) == "accept"
 
 
@@ -833,8 +833,8 @@ class TestBuildRefCounts:
         ]
         paths = ["path/a.md", "path/b.md"]
         counts = _build_ref_counts(blocks, paths)
-        assert counts["path/a.md"] == 1  # referenced by B's supersedes
-        assert counts["path/b.md"] == 1  # referenced by A's related
+        assert counts["path/a.md"] == 1
+        assert counts["path/b.md"] == 1
 
     def test_no_references(self) -> None:
         blocks = [Block(title="A", category="decisions", content="a")]
@@ -848,13 +848,13 @@ class TestScoreBlockEdgeCases:
         block = Block(title="t", category="decisions", content="c", date="not-a-date")
         config = Config()
         score = score_block(block, config, [], [])
-        assert score > 0  # falls back to days=0
+        assert score > 0
 
     def test_no_date(self) -> None:
         block = Block(title="t", category="decisions", content="c", date="")
         config = Config()
         score = score_block(block, config, [], [])
-        assert score > 0  # recency defaults to 0.5
+        assert score > 0
 
     def test_with_ref_counts(self) -> None:
         block = Block(title="t", category="decisions", content="c")
@@ -905,9 +905,8 @@ class TestBuildAndLoadIndex:
 
 class TestSelectBlocksBudget:
     def test_budget_overflow(self) -> None:
-        """Blocks exceeding budget are excluded."""
         config = Config()
-        config.budgets["generic"] = 10  # tiny budget
+        config.budgets["generic"] = 10
         blocks = [
             (Path("a.md"), Block(title="t", category="decisions", content="x " * 100)),
         ]
@@ -916,7 +915,6 @@ class TestSelectBlocksBudget:
         assert len(result) == 0
 
     def test_generic_fallback(self) -> None:
-        """Unknown tool falls back to generic budget."""
         config = Config()
         blocks = [
             (Path("a.md"), Block(title="t", category="decisions", content="short")),
@@ -924,6 +922,151 @@ class TestSelectBlocksBudget:
         with patch("wormhole.scoring.get_changed_files", return_value=[]):
             result = select_blocks(blocks, config, "unknown_tool")
         assert len(result) == 1
+
+
+class TestHookScript:
+    """Tests for the install-hooks command and hook script generation."""
+
+    def test_hook_uses_group_option_ordering(self) -> None:
+        """--quiet must come before 'end' (Click group option)."""
+        from wormhole.cli import _HOOK_SCRIPT
+        # The template should have --quiet before 'end'
+        rendered = _HOOK_SCRIPT.format(marker="# test", tool="claude")
+        assert "wormhole --quiet end claude" in rendered
+        assert "end --quiet" not in rendered
+
+    def test_hook_includes_tool_arg(self) -> None:
+        """Hook must pass a tool name so _resolve_tool doesn't fail."""
+        from wormhole.cli import _HOOK_SCRIPT
+        rendered = _HOOK_SCRIPT.format(marker="# test", tool="claude")
+        assert "end claude" in rendered
+
+    def test_install_hooks_requires_tool(self, tmp_path: Path) -> None:
+        """install-hooks with no tool and no default_tool should fail."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            # Create .git dir
+            (Path(td) / ".git" / "hooks").mkdir(parents=True)
+            result = runner.invoke(main, ["install-hooks"])
+            # Should fail: no tool, no default_tool
+            assert result.exit_code == 3  # EXIT_CONFIG
+
+    def test_install_hooks_with_tool(self, tmp_path: Path) -> None:
+        """install-hooks with explicit tool should produce correct hook."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            (Path(td) / ".git" / "hooks").mkdir(parents=True)
+            result = runner.invoke(main, ["install-hooks", "claude"])
+            assert result.exit_code == 0
+            hook = (Path(td) / ".git" / "hooks" / "post-commit").read_text()
+            assert "wormhole --quiet end claude" in hook
+
+
+class TestConfigBooleanCoercion:
+    """Config set must handle boolean strings correctly."""
+
+    def test_false_stored_as_bool(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            result = runner.invoke(main, ["config", "set", "llm.enabled", "false"])
+            assert result.exit_code == 0
+            # Verify it's stored as actual False, not string "false"
+            config = load_config(Path(td) / ".wormhole")
+            assert config.llm["enabled"] is False
+
+    def test_true_stored_as_bool(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            result = runner.invoke(main, ["config", "set", "llm.enabled", "true"])
+            assert result.exit_code == 0
+            config = load_config(Path(td) / ".wormhole")
+            assert config.llm["enabled"] is True
+
+
+class TestUninstallHooks:
+    def test_uninstall_removes_hook(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            runner.invoke(main, ["init"])
+            (Path(td) / ".git" / "hooks").mkdir(parents=True)
+            runner.invoke(main, ["install-hooks", "claude"])
+            result = runner.invoke(main, ["uninstall-hooks"])
+            assert result.exit_code == 0
+            assert not (Path(td) / ".git" / "hooks" / "post-commit").exists()
+
+    def test_uninstall_restores_local(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            hooks_dir = Path(td) / ".git" / "hooks"
+            hooks_dir.mkdir(parents=True)
+            # Create an existing hook first
+            original = hooks_dir / "post-commit"
+            original.write_text("#!/bin/sh\necho original\n")
+            original.chmod(0o755)
+            runner.invoke(main, ["init"])
+            runner.invoke(main, ["install-hooks", "claude"])
+            # Original should be renamed to .local
+            assert (hooks_dir / "post-commit.local").exists()
+            result = runner.invoke(main, ["uninstall-hooks"])
+            assert result.exit_code == 0
+            restored = (hooks_dir / "post-commit").read_text()
+            assert "original" in restored
+
+    def test_uninstall_no_git(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(main, ["uninstall-hooks"])
+            assert result.exit_code == 1
+
+
+class TestHarvestLockAndState:
+    def test_acquire_and_release_lock(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        fd = harvester._acquire_lock()
+        assert fd is not None
+        # Lock file should exist
+        assert (vault / ".harvest-lock").exists()
+        harvester._release_lock(fd)
+
+    def test_stale_lock_broken(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        lock_path = vault / ".harvest-lock"
+        lock_path.write_text("stale")
+        # Set mtime to 10 minutes ago
+        import os
+        old_time = time.time() - 600
+        os.utime(lock_path, (old_time, old_time))
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        fd = harvester._acquire_lock()
+        assert fd is not None
+        harvester._release_lock(fd)
+
+    def test_harvest_state_roundtrip(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        assert harvester._get_harvest_state() == ""
+        harvester._set_harvest_state("session-123")
+        assert harvester._get_harvest_state() == "session-123"
+
+    def test_llm_extract_disabled(self, tmp_path: Path) -> None:
+        vault = tmp_path / ".wormhole"
+        vault.mkdir()
+        config = Config()
+        harvester = BaseHarvester(vault, config)
+        # LLM disabled by default
+        result = harvester._llm_extract([{"role": "assistant", "content": "test"}])
+        assert result == []
 
 
 class TestParseFilenameEdgeCases:

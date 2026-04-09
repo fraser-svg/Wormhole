@@ -57,6 +57,7 @@ class Block:
     related: list[str] = field(default_factory=list)
     source_session_id: str = ""
     confidence: float = 1.0
+    extraction_method: str = ""  # "trigger", "llm", or "" for manual
 
 
 def read_block(path: Path) -> Block | None:
@@ -107,6 +108,7 @@ def read_block(path: Path) -> Block | None:
         related=fm.get("related") or [],
         source_session_id=str(fm.get("source_session_id", "")),
         confidence=float(fm.get("confidence", 1.0)),
+        extraction_method=str(fm.get("extraction_method", "")),
     )
 
 
@@ -152,6 +154,8 @@ def write_block(block: Block, vault_path: Path) -> Path:
         fm["source_session_id"] = block.source_session_id
     if block.confidence != 1.0:
         fm["confidence"] = block.confidence
+    if block.extraction_method:
+        fm["extraction_method"] = block.extraction_method
 
     frontmatter = yaml.dump(fm, default_flow_style=False, sort_keys=False).strip()
     output = f"---\n{frontmatter}\n---\n\n{block.content}\n"
