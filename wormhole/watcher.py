@@ -178,3 +178,48 @@ class TranscriptWatcher:
         """Signal the polling loop to stop."""
         self._running = False
         logger.info("Watcher stopping")
+
+
+class MultiProjectWatcher:
+    """Manage TranscriptWatcher instances across multiple projects."""
+
+    def __init__(self) -> None:
+        self._watchers: dict[str, TranscriptWatcher] = {}
+
+    def sync_projects(self, projects: list[dict[str, str]]) -> None:
+        """Add/remove watchers to match the given project list.
+
+        *projects* is a list of dicts with ``path`` keys.
+        """
+        active_paths = {p["path"] for p in projects}
+
+        # Remove watchers for deregistered projects
+        for path in list(self._watchers):
+            if path not in active_paths:
+                logger.info("Stopped watching: %s", path)
+                del self._watchers[path]
+
+        # Add watchers for new projects
+        for proj in projects:
+            path = proj["path"]
+            if path in self._watchers:
+                continue
+            vault_path = Path(path) / ".wormhole"
+            if not vault_path.is_dir():
+                continue
+            config = load_config(vault_path)
+            watcher = TranscriptWatcher(vault_path, config, project_path=path)
+            self._watchers[path] = watcher
+            logger.info("Started watching: %s", path)
+
+    def poll_once(self) -> dict[str, tuple[int, int, int]]:
+        """Poll all project watchers.  Returns {path: (written, skipped, staged)}."""
+        results: dict[str, tuple[int, int, int]] = {}
+        for path, watcher in self._watchers.items():
+            try:
+                w, sk, st = watcher.poll_once()
+                if w > 0 or st > 0:
+                    results[path] = (w, sk, st)
+            except Exception as exc:
+                logger.warning("Poll error for %s: %s", path, exc)
+        return results
