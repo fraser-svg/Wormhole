@@ -57,6 +57,7 @@ class Block:
     related: list[str] = field(default_factory=list)
     source_session_id: str = ""
     confidence: float = 1.0
+    extraction_method: str = ""  # "trigger", "llm", or "" for manual
 
 
 def read_block(path: Path) -> Block | None:
@@ -107,6 +108,7 @@ def read_block(path: Path) -> Block | None:
         related=fm.get("related") or [],
         source_session_id=str(fm.get("source_session_id", "")),
         confidence=float(fm.get("confidence", 1.0)),
+        extraction_method=str(fm.get("extraction_method", "")),
     )
 
 
@@ -152,6 +154,8 @@ def write_block(block: Block, vault_path: Path) -> Path:
         fm["source_session_id"] = block.source_session_id
     if block.confidence != 1.0:
         fm["confidence"] = block.confidence
+    if block.extraction_method:
+        fm["extraction_method"] = block.extraction_method
 
     frontmatter = yaml.dump(fm, default_flow_style=False, sort_keys=False).strip()
     output = f"---\n{frontmatter}\n---\n\n{block.content}\n"
@@ -172,7 +176,11 @@ def list_blocks(
     if category:
         search_dirs = [vault_path / category]
     else:
-        search_dirs = [d for d in vault_path.iterdir() if d.is_dir()]
+        search_dirs = [
+            d
+            for d in vault_path.iterdir()
+            if d.is_dir() and d.name in VALID_CATEGORIES
+        ]
 
     for directory in search_dirs:
         if not directory.exists():
@@ -227,9 +235,9 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _has_negation(text: str) -> bool:
-    """Check if text contains negation words."""
-    lower = text.lower()
-    return any(word in lower for word in NEGATION_WORDS)
+    """Check if text contains negation words (whole-word match)."""
+    words = set(text.lower().split())
+    return bool(words & NEGATION_WORDS)
 
 
 def deduplicate(

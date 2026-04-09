@@ -1,7 +1,9 @@
 """Base harvester for extracting knowledge blocks from AI transcripts."""
 
+import fcntl
 import logging
 import re
+import time
 from datetime import date
 from pathlib import Path
 
@@ -194,6 +196,7 @@ class BaseHarvester:
                             source_session_id=self.session_id,
                             confidence=confidence,
                             files=file_refs[:10],  # cap file references
+                            extraction_method="trigger",
                         )
                         blocks.append(block)
 
@@ -296,8 +299,27 @@ class BaseHarvester:
     def harvest(self) -> tuple[int, int, int]:
         """Full harvest pipeline: read, extract, dedup, write.
 
+        Acquires lockfile to prevent concurrent harvests.
         Returns (written, skipped, staged) counts.
         """
+        lock = self._acquire_lock()
+        if lock is None:
+            return 0, 0, 0
+
+        try:
+            return self._harvest_locked()
+        finally:
+            self._release_lock(lock)
+
+    def _harvest_locked(self) -> tuple[int, int, int]:
+        """Harvest implementation (called under lock)."""
+        # Read transcript first — subclasses set self.session_id during read
+        messages = self.read_transcript()
+        if not messages:
+            logger.warning("No messages found in transcript")
+            return 0, 0, 0
+
+        # Check idempotency AFTER read_transcript sets session_id
         last_session = self._get_harvest_state()
         if last_session and last_session == self.session_id and self.session_id:
             logger.info(
@@ -305,14 +327,17 @@ class BaseHarvester:
             )
             return 0, 0, 0
 
-        messages = self.read_transcript()
-        if not messages:
-            logger.warning("No messages found in transcript")
-            return 0, 0, 0
-
         blocks = self.extract_blocks(messages)
+
+        # LLM second pass (hybrid extraction)
+        llm_blocks = self._llm_extract(messages)
+        if llm_blocks:
+            blocks.extend(llm_blocks)
+
         if not blocks:
             logger.info("No knowledge blocks extracted")
+            if self.session_id:
+                self._set_harvest_state(self.session_id)
             return 0, 0, 0
 
         written, skipped, staged = self.deduplicate_and_write(blocks)
@@ -321,6 +346,73 @@ class BaseHarvester:
             self._set_harvest_state(self.session_id)
 
         return written, skipped, staged
+
+    def _acquire_lock(self) -> object | None:
+        """Acquire harvest lock. Returns file object on success, None if locked."""
+        lock_path = self.vault_path / ".harvest-lock"
+        self.vault_path.mkdir(parents=True, exist_ok=True)
+
+        # Break stale locks (mtime > 5 minutes)
+        if lock_path.exists():
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > 300:
+                    logger.warning("Breaking stale harvest lock (%.0fs old)", age)
+                    lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        fd = None
+        try:
+            fd = lock_path.open("w")
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd.write(str(int(time.time())) + "\n")
+            fd.flush()
+            return fd
+        except (OSError, BlockingIOError):
+            if fd is not None:
+                fd.close()
+            logger.warning("Another harvest is running, skipping")
+            return None
+
+    def _release_lock(self, fd: object) -> None:
+        """Release harvest lock."""
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)  # type: ignore[union-attr]
+            fd.close()  # type: ignore[union-attr]
+        except OSError:
+            pass
+
+    def _llm_extract(self, messages: list[dict]) -> list[Block]:
+        """Run LLM extraction if enabled in config. Returns empty list on failure."""
+        llm_config = self.config.llm
+        if not llm_config.get("enabled", False):
+            return []
+
+        try:
+            from wormhole.llm import LLMExtractor
+        except ImportError:
+            logger.warning(
+                "LLM extraction enabled but anthropic package not installed. "
+                "Install with: pip install wormhole-ai[llm]"
+            )
+            return []
+
+        try:
+            extractor = LLMExtractor(self.config)
+            blocks = extractor.extract_blocks(
+                messages,
+                session_id=self.session_id,
+                tool_name=self.tool_name,
+            )
+            return blocks
+        except (ImportError, ValueError) as exc:
+            logger.warning(
+                "LLM extraction failed: %s. Falling back to trigger phrases. "
+                "Run `wormhole config show llm` to check your setup.",
+                exc,
+            )
+            return []
 
     def _get_harvest_state(self) -> str:
         """Read last-harvested session ID from .harvest-state file."""
