@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0.0] - 2026-04-09
+
+### Added
+- Background daemon: `wormhole up` / `wormhole down` for persistent multi-project watching
+- Auto-init: daemon discovers projects from `~/.claude/projects/` and creates `.wormhole/` automatically
+- Multi-project watcher: `MultiProjectWatcher` manages N project watchers simultaneously
+- Project registry: tracks discovered projects in `~/.wormhole/projects.json`
+- MCP server: `wormhole mcp` exposes vault queries to Claude Code via stdio transport
+- MCP tools: `query_vault`, `get_block`, `search_vault`, `list_projects`
+- MCP config installer: `wormhole mcp install` registers in `~/.claude.json`
+- Global config: `~/.wormhole/config.yaml` for daemon settings, discovery, and project defaults
+- `wormhole daemon-status` command shows running state and tracked project count
+- `--foreground` flag on `wormhole up` for debugging and service manager integration
+- 43 new tests (186 total) covering daemon, registry, multi-watcher, and MCP server
+
+### Changed
+- `init_vault()` extracted from CLI into `vault.py` for reuse by daemon auto-init
+- `mcp` optional dependency group: `pip install wormhole-ai[mcp]`
+- MCP server validates project paths (resolve + absolute + directory check) against path traversal
+- Regex pattern length capped at 1000 chars in `search_vault` to prevent ReDoS
+- Daemon loop catches per-iteration exceptions to prevent silent death
+- `install_mcp_config` refuses to overwrite corrupt `~/.claude.json`
+- Windows guard on `start_daemon` (requires `--foreground` on Windows)
+- Global config ignores unknown YAML keys instead of crashing
+
 ## [0.2.0.0] - 2026-04-09
 
 ### Added
